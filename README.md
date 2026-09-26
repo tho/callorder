@@ -34,7 +34,7 @@ linters so that fixes satisfy all three.
 
 | Setting | Default | Rule |
 | --- | --- | --- |
-| `init-first` | `false` | `init` functions come before other functions. Mirrors `decorder`'s `disable-init-func-first-check: false`. |
+| `init-first` | `false` | `init` functions come before other functions. Enabling it matches `decorder`'s `disable-init-func-first-check: false`. |
 | `constructor` | `true` | Constructors (exported `New*` or `Must*` returning a type declared in the file) stay after that type and before its methods. |
 | `struct-method` | `true` | Exported methods come before unexported methods of the same type. |
 | `alphabetical` | `false` | A type's constructors, exported methods, and unexported methods are each sorted by name. As in `funcorder`, constructors are sorted only with `constructor`, and methods only with `struct-method`. |
