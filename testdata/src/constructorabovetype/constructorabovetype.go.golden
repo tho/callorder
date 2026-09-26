@@ -1,0 +1,20 @@
+// Package constructorabovetype keeps constructors above their type, which
+// funcorder reports, but still orders the methods.
+package constructorabovetype
+
+// NewConfig returns a config.
+func NewConfig() *Config { return &Config{} }
+
+// MustConfig returns a config.
+func MustConfig() *Config { return NewConfig() }
+
+// Config configures.
+type Config struct{ name string }
+
+// Name returns the name.
+func (c *Config) Name() string { return c.name }
+
+// Long reports a long name.
+func (c *Config) Long() bool { return c.length() > 10 }
+
+func (c *Config) length() int { return len(c.name) } // want `expected Name before length: exported methods come before unexported methods \(funcorder struct-method\)`

@@ -1,0 +1,37 @@
+// Package calls orders helpers after their callers.
+package calls
+
+import "fmt"
+
+// Load is the first entry point.
+func Load() string {
+	return parse(shared())
+}
+
+// parse keeps its doc comment and directive.
+//
+//go:noinline
+func parse(s string) string { return trim(s) } // parse keeps its trailing comment
+
+func trim(s string) string { return s }
+
+// Save is the second entry point.
+func Save() {
+	defer func() { fmt.Println(shared()) }()
+	format()
+}
+
+// Separate comments stay between the same declarations.
+
+// shared is used by both entry points, so it follows the last one.
+func shared() string { return "shared" } // want `expected Load before shared in depth-first call order`
+
+func format() {}
+
+// Parity calls the recursive pair.
+func Parity(n int) bool { return even(n) }
+
+// odd and even are mutually recursive, so they stay together in source order.
+func odd(n int) bool { return n != 0 && even(n-1) }
+
+func even(n int) bool { return n == 0 || odd(n-1) }

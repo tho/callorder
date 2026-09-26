@@ -1,0 +1,15 @@
+// Package function puts exported functions first, like funcorder's function check.
+package function
+
+// Serve serves.
+func Serve() {
+	helper()
+	route()
+}
+
+// Close closes.
+func Close() {}
+
+func helper() {} // want `expected Serve before helper: exported functions come before unexported functions \(funcorder function\)`
+
+func route() {}
