@@ -374,6 +374,81 @@ func NewB() T { return T{} }
 func NewA() T { return T{} }`},
 		},
 		{
+			name:  "alphabetical methods only with the struct-method check",
+			flags: []string{"alphabetical=true", "struct-method=false"},
+			sources: []string{`package p
+type T struct{}
+func (T) B() {}
+func (T) A() {}
+func (T) b() {}
+func (T) a() {}`},
+		},
+		{
+			name:  "disabled constructor check lets constructors move above their type",
+			flags: []string{"constructor=false"},
+			sources: []string{`package p
+func a() { b() }
+func c() {}
+func d() {}
+type T struct{}
+func b() { NewT() }
+func NewT() T { a(); return T{} }`},
+			want:    []int{0, 3, 4, 1, 2},
+			message: "expected b before c in depth-first call order",
+		},
+		{
+			name: "constructor check keeps constructors below their type",
+			sources: []string{`package p
+func a() { b() }
+func c() {}
+func d() {}
+type T struct{}
+func b() { NewT() }
+func NewT() T { a(); return T{} }`},
+			want:    []int{0, 3, 1, 4, 2},
+			message: "expected b before c in depth-first call order",
+		},
+		{
+			name: "constructor above its type names the constructor rule",
+			sources: []string{`package p
+func NewT() *T { return &T{} }
+type T struct{}
+func other() {}`},
+			want:    []int{1, 0},
+			message: "expected other before NewT: constructors come after their type (funcorder constructor)",
+		},
+		{
+			name: "constructor returning a value and an error",
+			sources: []string{`package p
+type T struct{}
+func (T) m() {}
+func NewT() (T, error) { return T{}, nil }`},
+			want:    []int{1, 0},
+			message: "constructors come before their type's methods (funcorder constructor)",
+		},
+		{
+			name: "types declared in other files are not funcorder types",
+			sources: []string{
+				"package p; func (T) m() {}; func NewT() T { return T{} }",
+				"package p; type T struct{}",
+			},
+		},
+		{
+			name: "line directives do not turn doc comments into trailing comments",
+			sources: []string{`package p
+
+func b() {}
+
+func a() {
+	b()
+} // trailing
+//line test0.go:6
+
+// c doc
+func c() { b() }`},
+			want: []int{1, 2, 0},
+		},
+		{
 			name:  "function check excludes init and methods",
 			flags: []string{"function=true"},
 			sources: []string{`package p

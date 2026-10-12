@@ -1,9 +1,10 @@
 # callorder
 
 `callorder` checks the order of functions and methods within each non-generated
-Go file. It reports a misplaced declaration and offers a suggested fix that
-reorders declarations with their comments and directives. It leaves type,
-constant, and variable declarations in place.
+Go file. It reports one misplaced declaration per file and offers a suggested
+fix that reorders the file's functions with their doc comments, directives, and
+same-line trailing comments. Free-standing comments and type, constant, and
+variable declarations stay in place.
 
 ## Ordering rules
 
@@ -24,7 +25,10 @@ constant, and variable declarations in place.
 
 A diagnostic names the rule a misplaced function breaks, for example
 `expected A before b: exported methods come before unexported methods
-(funcorder struct-method)`, or reports a break in depth-first call order.
+(funcorder struct-method)`, or reports a break in depth-first call order. The
+diagnostic sits on the function occupying the first slot the fix changes, which
+need not be the function that moves furthest; applying the fix settles the whole
+file.
 
 ## Settings
 
@@ -52,7 +56,7 @@ at the versions golangci-lint v2.13.2 pins; update them together.
 ## Standalone
 
 From this repository, run `go run ./cmd/callorder ./...` to audit or
-`go run ./cmd/callorder --fix ./...` to rewrite files. For JSON diagnostics,
+`go run ./cmd/callorder -fix ./...` to rewrite files. For JSON diagnostics,
 use `go run ./cmd/callorder -json ./...`. You can also build or install the
 binary with `go build -o callorder ./cmd/callorder` or
 `go install ./cmd/callorder`. Settings are flags, for example

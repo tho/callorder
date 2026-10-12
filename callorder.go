@@ -95,8 +95,14 @@ func checkFile(pass *analysis.Pass, file *ast.File, enabled checks) error {
 			return err
 		}
 
+		// Rules explain most displacements; otherwise a constructor above its type is pushed down.
+		reason := brokenRule(rules, reasons, index, slot)
+		if reason == "" && minimum[slot] > funcs[slot].Pos() {
+			reason = "constructors come after their type (funcorder constructor)"
+		}
+
 		message := fmt.Sprintf("expected %s before %s in depth-first call order", funcs[index].Name.Name, funcs[slot].Name.Name)
-		if reason := brokenRule(rules, reasons, index, slot); reason != "" {
+		if reason != "" {
 			message = fmt.Sprintf("expected %s before %s: %s", funcs[index].Name.Name, funcs[slot].Name.Name, reason)
 		}
 
@@ -538,10 +544,13 @@ func reorderFix(
 		return analysis.SuggestedFix{}, err
 	}
 
+	// Physical lines: //line directives must not make a doc comment look like a trailing one.
+	line := func(pos token.Pos) int { return tok.PositionFor(pos, false).Line }
+
 	// A trailing comment is safe to move only when no other declaration shares its line.
 	trailing := true
 	for i := 1; i < len(file.Decls); i++ {
-		trailing = trailing && tok.Line(file.Decls[i-1].End()) != tok.Line(file.Decls[i].Pos())
+		trailing = trailing && line(file.Decls[i-1].End()) != line(file.Decls[i].Pos())
 	}
 
 	starts, ends := make([]token.Pos, len(funcs)), make([]token.Pos, len(funcs))
@@ -552,7 +561,7 @@ func reorderFix(
 		}
 
 		for _, comment := range file.Comments {
-			if trailing && comment.Pos() >= ends[i] && tok.Line(comment.Pos()) == tok.Line(fn.End()) {
+			if trailing && comment.Pos() >= ends[i] && line(comment.Pos()) == line(fn.End()) {
 				ends[i] = comment.End()
 			}
 		}
