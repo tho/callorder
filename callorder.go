@@ -118,33 +118,6 @@ func checkFile(pass *analysis.Pass, file *ast.File, enabled checks) error {
 	return nil
 }
 
-// brokenRule explains why from must precede to when rules require it. The file
-// places to first, so some step of the rule path runs backwards; name that rule.
-func brokenRule(rules [][]int, reasons [][]string, from, to int) string {
-	type step struct {
-		from   int
-		reason string
-	}
-
-	via := make([]*step, len(rules))
-	for queue := []int{from}; len(queue) > 0 && via[to] == nil; queue = queue[1:] {
-		for k, next := range rules[queue[0]] {
-			if via[next] == nil {
-				via[next] = &step{queue[0], reasons[queue[0]][k]}
-				queue = append(queue, next)
-			}
-		}
-	}
-
-	for node := to; via[node] != nil && node != from; node = via[node].from {
-		if via[node].from > node {
-			return via[node].reason
-		}
-	}
-
-	return ""
-}
-
 func callGraph(pass *analysis.Pass, file *ast.File) ([]*ast.FuncDecl, [][]int) {
 	funcs := []*ast.FuncDecl{}
 	indices := map[types.Object]int{}
@@ -181,6 +154,151 @@ func callGraph(pass *analysis.Pass, file *ast.File) ([]*ast.FuncDecl, [][]int) {
 	}
 
 	return funcs, edges
+}
+
+// linterConstraints returns the enabled decorder and funcorder precedence rules,
+// why each exists, and the earliest position each constructor can occupy.
+// Rules only run from init to other functions, from exported to unexported
+// declarations, from constructors to methods, or forward in name order, so they
+// never form a cycle.
+func linterConstraints(
+	pass *analysis.Pass, file *ast.File, funcs []*ast.FuncDecl, enabled checks,
+) ([][]int, [][]string, []token.Pos) {
+	rules, reasons := make([][]int, len(funcs)), make([][]string, len(funcs))
+	add := func(before, after int, reason string) {
+		rules[before] = append(rules[before], after)
+		reasons[before] = append(reasons[before], reason)
+	}
+
+	typeOf := make([]types.Object, len(funcs))
+	constructor := make([]bool, len(funcs))
+	minimum := make([]token.Pos, len(funcs))
+
+	for i, fn := range funcs {
+		typeOf[i], constructor[i] = funcorderType(pass, file, fn)
+		if constructor[i] && enabled.constructor {
+			minimum[i] = typeOf[i].Pos()
+		}
+	}
+
+	isInit := func(fn *ast.FuncDecl) bool { return fn.Recv == nil && fn.Name.Name == "init" }
+
+	for i, before := range funcs {
+		for j, after := range funcs {
+			sameType := i != j && typeOf[i] != nil && typeOf[i] == typeOf[j] && after.Recv != nil
+
+			switch {
+			case i == j:
+			case isInit(before) && isInit(after):
+				if i < j {
+					add(i, j, "init functions run in source order")
+				}
+			case isInit(before):
+				if enabled.initFirst {
+					add(i, j, "init functions come first (decorder init-first)")
+				}
+			case sameType && constructor[i]:
+				if enabled.constructor {
+					add(i, j, "constructors come before their type's methods (funcorder constructor)")
+				}
+			case sameType && before.Recv != nil:
+				if enabled.structMethod && before.Name.IsExported() && !after.Name.IsExported() {
+					add(i, j, "exported methods come before unexported methods (funcorder struct-method)")
+				}
+			case before.Recv == nil && after.Recv == nil && !isInit(after):
+				if enabled.function && before.Name.IsExported() && !after.Name.IsExported() {
+					add(i, j, "exported functions come before unexported functions (funcorder function)")
+				}
+			}
+		}
+	}
+
+	if !enabled.alphabetical {
+		return rules, reasons, minimum
+	}
+
+	// funcorder sorts a type's constructors, exported methods, and unexported
+	// methods separately, and only within the checks that place them.
+	type set struct {
+		typ  types.Object
+		kind int
+	}
+
+	sorted := []int{}
+	sets := make([]set, len(funcs))
+
+	for i, fn := range funcs {
+		switch {
+		case typeOf[i] == nil:
+			continue
+		case constructor[i] && enabled.constructor:
+			sets[i] = set{typeOf[i], 1}
+		case fn.Recv != nil && enabled.structMethod && fn.Name.IsExported():
+			sets[i] = set{typeOf[i], 2}
+		case fn.Recv != nil && enabled.structMethod:
+			sets[i] = set{typeOf[i], 3}
+		default:
+			continue
+		}
+
+		sorted = append(sorted, i)
+	}
+
+	slices.SortFunc(sorted, func(a, b int) int {
+		return cmp.Or(strings.Compare(funcs[a].Name.Name, funcs[b].Name.Name), a-b)
+	})
+
+	last := map[set]int{}
+	for _, i := range sorted {
+		if previous, ok := last[sets[i]]; ok {
+			add(previous, i, "constructors and methods are sorted by name (funcorder alphabetical)")
+		}
+
+		last[sets[i]] = i
+	}
+
+	return rules, reasons, minimum
+}
+
+// Match funcorder's same-file named types, pointer receivers, and New/Must prefixes.
+func funcorderType(pass *analysis.Pass, file *ast.File, fn *ast.FuncDecl) (types.Object, bool) {
+	var expr ast.Expr
+
+	constructor := fn.Recv == nil
+	if constructor {
+		name := strings.ToLower(fn.Name.Name)
+
+		prefix := (strings.HasPrefix(name, "new") && len(name) > 3) || (strings.HasPrefix(name, "must") && len(name) > 4)
+		if !fn.Name.IsExported() || !prefix || fn.Type.Results.NumFields() == 0 {
+			return nil, false
+		}
+
+		expr = fn.Type.Results.List[0].Type
+	} else {
+		expr = fn.Recv.List[0].Type
+	}
+
+	for {
+		pointer, ok := expr.(*ast.StarExpr)
+		if !ok {
+			break
+		}
+
+		expr = pointer.X
+	}
+
+	name, ok := expr.(*ast.Ident)
+	if !ok {
+		return nil, false
+	}
+
+	// Like funcorder, match by name: a type parameter named T is not the type T.
+	obj, ok := pass.Pkg.Scope().Lookup(name.Name).(*types.TypeName)
+	if !ok || obj.Pos() < file.Pos() || obj.Pos() >= file.End() {
+		return nil, false
+	}
+
+	return obj, constructor
 }
 
 // functionOrder plans which function fills each slot; rank gives the source order to follow.
@@ -387,151 +505,6 @@ func incoming(edges [][]int) []int {
 	return counts
 }
 
-// linterConstraints returns the enabled decorder and funcorder precedence rules,
-// why each exists, and the earliest position each constructor can occupy.
-// Rules only run from init to other functions, from exported to unexported
-// declarations, from constructors to methods, or forward in name order, so they
-// never form a cycle.
-func linterConstraints(
-	pass *analysis.Pass, file *ast.File, funcs []*ast.FuncDecl, enabled checks,
-) ([][]int, [][]string, []token.Pos) {
-	rules, reasons := make([][]int, len(funcs)), make([][]string, len(funcs))
-	add := func(before, after int, reason string) {
-		rules[before] = append(rules[before], after)
-		reasons[before] = append(reasons[before], reason)
-	}
-
-	typeOf := make([]types.Object, len(funcs))
-	constructor := make([]bool, len(funcs))
-	minimum := make([]token.Pos, len(funcs))
-
-	for i, fn := range funcs {
-		typeOf[i], constructor[i] = funcorderType(pass, file, fn)
-		if constructor[i] && enabled.constructor {
-			minimum[i] = typeOf[i].Pos()
-		}
-	}
-
-	isInit := func(fn *ast.FuncDecl) bool { return fn.Recv == nil && fn.Name.Name == "init" }
-
-	for i, before := range funcs {
-		for j, after := range funcs {
-			sameType := i != j && typeOf[i] != nil && typeOf[i] == typeOf[j] && after.Recv != nil
-
-			switch {
-			case i == j:
-			case isInit(before) && isInit(after):
-				if i < j {
-					add(i, j, "init functions run in source order")
-				}
-			case isInit(before):
-				if enabled.initFirst {
-					add(i, j, "init functions come first (decorder init-first)")
-				}
-			case sameType && constructor[i]:
-				if enabled.constructor {
-					add(i, j, "constructors come before their type's methods (funcorder constructor)")
-				}
-			case sameType && before.Recv != nil:
-				if enabled.structMethod && before.Name.IsExported() && !after.Name.IsExported() {
-					add(i, j, "exported methods come before unexported methods (funcorder struct-method)")
-				}
-			case before.Recv == nil && after.Recv == nil && !isInit(after):
-				if enabled.function && before.Name.IsExported() && !after.Name.IsExported() {
-					add(i, j, "exported functions come before unexported functions (funcorder function)")
-				}
-			}
-		}
-	}
-
-	if !enabled.alphabetical {
-		return rules, reasons, minimum
-	}
-
-	// funcorder sorts a type's constructors, exported methods, and unexported
-	// methods separately, and only within the checks that place them.
-	type set struct {
-		typ  types.Object
-		kind int
-	}
-
-	sorted := []int{}
-	sets := make([]set, len(funcs))
-
-	for i, fn := range funcs {
-		switch {
-		case typeOf[i] == nil:
-			continue
-		case constructor[i] && enabled.constructor:
-			sets[i] = set{typeOf[i], 1}
-		case fn.Recv != nil && enabled.structMethod && fn.Name.IsExported():
-			sets[i] = set{typeOf[i], 2}
-		case fn.Recv != nil && enabled.structMethod:
-			sets[i] = set{typeOf[i], 3}
-		default:
-			continue
-		}
-
-		sorted = append(sorted, i)
-	}
-
-	slices.SortFunc(sorted, func(a, b int) int {
-		return cmp.Or(strings.Compare(funcs[a].Name.Name, funcs[b].Name.Name), a-b)
-	})
-
-	last := map[set]int{}
-	for _, i := range sorted {
-		if previous, ok := last[sets[i]]; ok {
-			add(previous, i, "constructors and methods are sorted by name (funcorder alphabetical)")
-		}
-
-		last[sets[i]] = i
-	}
-
-	return rules, reasons, minimum
-}
-
-// Match funcorder's same-file named types, pointer receivers, and New/Must prefixes.
-func funcorderType(pass *analysis.Pass, file *ast.File, fn *ast.FuncDecl) (types.Object, bool) {
-	var expr ast.Expr
-
-	constructor := fn.Recv == nil
-	if constructor {
-		name := strings.ToLower(fn.Name.Name)
-
-		prefix := (strings.HasPrefix(name, "new") && len(name) > 3) || (strings.HasPrefix(name, "must") && len(name) > 4)
-		if !fn.Name.IsExported() || !prefix || fn.Type.Results.NumFields() == 0 {
-			return nil, false
-		}
-
-		expr = fn.Type.Results.List[0].Type
-	} else {
-		expr = fn.Recv.List[0].Type
-	}
-
-	for {
-		pointer, ok := expr.(*ast.StarExpr)
-		if !ok {
-			break
-		}
-
-		expr = pointer.X
-	}
-
-	name, ok := expr.(*ast.Ident)
-	if !ok {
-		return nil, false
-	}
-
-	// Like funcorder, match by name: a type parameter named T is not the type T.
-	obj, ok := pass.Pkg.Scope().Lookup(name.Name).(*types.TypeName)
-	if !ok || obj.Pos() < file.Pos() || obj.Pos() >= file.End() {
-		return nil, false
-	}
-
-	return obj, constructor
-}
-
 // reorderFix swaps function slots only; other declarations keep their order.
 // Move doc comments (including directives), bodies, and same-line trailing comments together.
 func reorderFix(
@@ -578,4 +551,31 @@ func reorderFix(
 	}
 
 	return fix, nil
+}
+
+// brokenRule explains why from must precede to when rules require it. The file
+// places to first, so some step of the rule path runs backwards; name that rule.
+func brokenRule(rules [][]int, reasons [][]string, from, to int) string {
+	type step struct {
+		from   int
+		reason string
+	}
+
+	via := make([]*step, len(rules))
+	for queue := []int{from}; len(queue) > 0 && via[to] == nil; queue = queue[1:] {
+		for k, next := range rules[queue[0]] {
+			if via[next] == nil {
+				via[next] = &step{queue[0], reasons[queue[0]][k]}
+				queue = append(queue, next)
+			}
+		}
+	}
+
+	for node := to; via[node] != nil && node != from; node = via[node].from {
+		if via[node].from > node {
+			return via[node].reason
+		}
+	}
+
+	return ""
 }
